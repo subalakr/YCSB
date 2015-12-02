@@ -73,6 +73,7 @@ public class CouchbaseClient extends DB {
   public static final String PERSIST_PROPERTY = "couchbase.persistTo";
   public static final String REPLICATE_PROPERTY = "couchbase.replicateTo";
   public static final String JSON_PROPERTY = "couchbase.json";
+  public static final String UPSERT_PROPERTY = "couchbase.upsert";
 
   protected static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
@@ -81,6 +82,8 @@ public class CouchbaseClient extends DB {
   private ReplicateTo replicateTo;
   private boolean checkFutures;
   private boolean useJson;
+  private boolean upsert;
+
   private final Logger log = LoggerFactory.getLogger(getClass());
 
   @Override
@@ -93,6 +96,7 @@ public class CouchbaseClient extends DB {
 
     checkFutures = props.getProperty(CHECKF_PROPERTY, "true").equals("true");
     useJson = props.getProperty(JSON_PROPERTY, "true").equals("true");
+    upsert = props.getProperty(UPSERT_PROPERTY, "false").equals("true");
 
     persistTo = parsePersistTo(props.getProperty(PERSIST_PROPERTY, "0"));
     replicateTo = parseReplicateTo(props.getProperty(REPLICATE_PROPERTY, "0"));
@@ -224,12 +228,12 @@ public class CouchbaseClient extends DB {
     String formattedKey = formatKey(table, key);
 
     try {
-      final OperationFuture<Boolean> future = client.add(
-        formattedKey,
-        encode(values),
-        persistTo,
-        replicateTo
-      );
+      final OperationFuture<Boolean> future;
+      if (upsert) {
+        future = client.set(formattedKey, encode(values), persistTo, replicateTo);
+      } else {
+        future = client.add(formattedKey, encode(values), persistTo, replicateTo);
+      }
       return checkFutureStatus(future);
     } catch (Exception e) {
       if (log.isErrorEnabled()) {
