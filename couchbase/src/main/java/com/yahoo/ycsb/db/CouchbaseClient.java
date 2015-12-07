@@ -47,7 +47,7 @@ import java.util.Set;
 import java.util.Vector;
 
 /**
- * A class that wraps the CouchbaseClient to allow it to be interfaced with YCSB.
+ * A class that wraps the 1.x CouchbaseClient to allow it to be interfaced with YCSB.
  * This class extends {@link DB} and implements the database interface used by YCSB client.
  *
  * <p> The following options must be passed when using this database client.
@@ -57,9 +57,10 @@ import java.util.Vector;
  * <li><b>couchbase.bucket=default</b> The bucket name to use./li>
  * <li><b>couchbase.password=</b> The password of the bucket.</li>
  * <li><b>couchbase.checkFutures=true</b> If the futures should be inspected (makes ops sync).</li>
- * <li><b>couchbase.persistTo=0</b> Observe Persistence ("PersistTo" constraint)</li>
- * <li><b>couchbase.replicateTo=0</b> Observe Replication ("ReplicateTo" constraint)</li>
+ * <li><b>couchbase.persistTo=0</b> Persistence durability requirement</li>
+ * <li><b>couchbase.replicateTo=0</b> Replication durability requirement</li>
  * <li><b>couchbase.json=true</b> Use json or java serialization as target format.</li>
+ * <li><b>couchbase.upsert=false</b> Use set instead of add or replace.</li>
  * </ul>
  *
  * @author Michael Nitschinger
@@ -208,12 +209,13 @@ public class CouchbaseClient extends DB {
     String formattedKey = formatKey(table, key);
 
     try {
-      final OperationFuture<Boolean> future = client.replace(
-        formattedKey,
-        encode(values),
-        persistTo,
-        replicateTo
-      );
+      final OperationFuture<Boolean> future;
+
+      if (upsert) {
+        future = client.set(formattedKey, encode(values), persistTo, replicateTo);
+      } else {
+        future = client.replace(formattedKey, encode(values), persistTo, replicateTo);
+      }
       return checkFutureStatus(future);
     } catch (Exception e) {
       if (log.isErrorEnabled()) {
