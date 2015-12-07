@@ -126,7 +126,6 @@ LICENSE file.
     <module>redis</module>
     <module>s3</module>
     <module>tarantool</module>
-    <module>couchbase2</module>
     <!--<module>voldemort</module>-->
   </modules>
 
