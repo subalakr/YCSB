@@ -27,6 +27,7 @@ import com.couchbase.client.java.document.json.JsonArray;
 import com.couchbase.client.java.document.json.JsonObject;
 import com.couchbase.client.java.env.CouchbaseEnvironment;
 import com.couchbase.client.java.env.DefaultCouchbaseEnvironment;
+import com.couchbase.client.java.error.TemporaryFailureException;
 import com.couchbase.client.java.query.N1qlParams;
 import com.couchbase.client.java.query.N1qlQuery;
 import com.couchbase.client.java.query.N1qlQueryResult;
@@ -94,6 +95,8 @@ public class Couchbase2Client extends DB {
     private boolean adhoc;
     private boolean kv;
     private int maxParallelism;
+    private final int MAX_RETRIES = 5;
+
 
     @Override
     public void init() throws DBException {
@@ -148,6 +151,7 @@ public class Couchbase2Client extends DB {
                 }
                 content = loaded.content();
             } else {
+
                 String readQuery = "SELECT " + joinSet(bucketName, fields) + " FROM `"
                   + bucketName + "` USE KEYS [$1]";
                 N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
@@ -240,9 +244,9 @@ public class Couchbase2Client extends DB {
                 }
 
                 waitForMutationResponse(bucket.async().insert(
-                  JsonDocument.create(formatId(table, key), encodeIntoJson(values)),
-                  persistTo,
-                  replicateTo
+                        JsonDocument.create(formatId(table, key), encodeIntoJson(values)),
+                        persistTo,
+                        replicateTo
                 ));
             } else {
                 String insertQuery = "INSERT INTO `" + bucketName + "`(KEY,VALUE) VALUES ($1,$2)";
@@ -350,38 +354,49 @@ public class Couchbase2Client extends DB {
     @Override
     public Status scan(String table, String startkey, int recordcount, Set<String> fields,
         Vector<HashMap<String, ByteIterator>> result) {
-        try {
-            String scanQuery = "SELECT " + joinSet(bucketName, fields) + " FROM `"
-              + bucketName + "` WHERE meta().id >= '$1' LIMIT $2";
-            N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
-                scanQuery,
-                JsonArray.from(formatId(table, startkey), recordcount),
-                N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
-            ));
+        int retry_count;
+        retry:
+        for (retry_count = 0; retry_count < MAX_RETRIES; retry_count++) {
+            try {
+                String scanQuery = "SELECT " + joinSet(bucketName, fields) + " FROM `"
+                        + bucketName + "` WHERE meta().id >= '$1' LIMIT $2";
 
-            if (!queryResult.parseSuccess() || !queryResult.finalSuccess()) {
-                System.err.println(scanQuery);
-                System.err.println(queryResult.errors());
+                N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
+                        scanQuery,
+                        JsonArray.from(formatId(table, startkey), recordcount),
+                        N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
+                ));
+
+
+                if (!queryResult.parseSuccess() || !queryResult.finalSuccess()) {
+                    System.err.println(scanQuery);
+                    System.err.println(queryResult.errors());
+
+                    return Status.ERROR;
+                }
+
+                boolean allFields = fields == null || fields.isEmpty();
+                result.ensureCapacity(recordcount);
+
+                for (N1qlQueryRow row : queryResult) {
+                    JsonObject value = row.value();
+                    fields = allFields ? value.getNames() : fields;
+                    HashMap<String, ByteIterator> tuple = new HashMap<String, ByteIterator>(fields.size());
+                    for (String field : fields) {
+                        tuple.put(field, new StringByteIterator(value.getString(field)));
+                    }
+                    result.add(tuple);
+                }
+                return Status.OK;
+            } catch (TemporaryFailureException ex) {
+                continue retry;
+            } catch (Exception ex) {
+                ex.printStackTrace();
                 return Status.ERROR;
             }
-
-            boolean allFields = fields == null || fields.isEmpty();
-            result.ensureCapacity(recordcount);
-
-            for (N1qlQueryRow row : queryResult) {
-                JsonObject value = row.value();
-                fields = allFields ? value.getNames() : fields;
-                HashMap<String, ByteIterator> tuple = new HashMap<String, ByteIterator>(fields.size());
-                for (String field : fields) {
-                    tuple.put(field, new StringByteIterator(value.getString(field)));
-                }
-                result.add(tuple);
-            }
-            return Status.OK;
-        } catch (Exception ex) {
-            ex.printStackTrace();
-            return Status.ERROR;
         }
+        System.err.println("Exceeded max retries with tmpfail");
+        return Status.ERROR;
     }
 
     private static String joinSet(final String bucket, final Set<String> fields) {
