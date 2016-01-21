@@ -23,21 +23,17 @@ import org.apache.http.*;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
-import org.apache.http.conn.routing.HttpRoute;
+import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonParser;
-
 import org.apache.http.message.BasicNameValuePair;
 
 import java.io.*;
 import java.util.*;
-
-import org.apache.commons.io.IOUtils;
 
 /**
  * A class that wraps the 1.x CouchbaseClient to allow it to be interfaced with YCSB.
@@ -65,6 +61,7 @@ public class CouchbaseRestClient extends DB {
   public static final String ADHOC_PROPOERTY = "couchbase.adhoc";
   public static final String MAX_PARALLEL_PROPERTY = "couchbase.maxParallelism";
   public static final String N1QLHOSTS_PROPERTY = "couchbase.n1qlhosts";
+  public static final String UPSERT_PROPERTY = "couchbase.upsert";
 
   public static final int N1QL_PORT = 8093;
   public static final int QUERY_TIMEOUT = 75000;
@@ -102,7 +99,7 @@ public class CouchbaseRestClient extends DB {
             + bucketName + "` USE KEYS [$1]";
     JsonArray args = new JsonArray();
     args.add(formatId(table, key));
-    return query(readQuery, args.toString());
+    return query(readQuery, args);
   }
 
   @Override
@@ -112,7 +109,7 @@ public class CouchbaseRestClient extends DB {
     String updateQuery = "UPDATE `" + bucketName + "` USE KEYS [$1] SET " + fields;
     JsonArray args = new JsonArray();
     args.add(formatId(table, key));
-    return query(updateQuery, args.toString());
+    return query(updateQuery, args);
   }
 
 
@@ -122,7 +119,7 @@ public class CouchbaseRestClient extends DB {
     JsonArray args = new JsonArray();
     args.add(formatId(table, key));
     args.add(encodeIntoJson(values));
-    return query(insertQuery, args.toString());
+    return query(insertQuery, args);
   }
 
   private Status upsert(String table, String key, HashMap<String, ByteIterator> values) {
@@ -130,7 +127,7 @@ public class CouchbaseRestClient extends DB {
     JsonArray args = new JsonArray();
     args.add(formatId(table, key));
     args.add(encodeIntoJson(values));
-    return query(upsertQuery, args.toString());
+    return query(upsertQuery, args);
   }
 
 
@@ -139,7 +136,7 @@ public class CouchbaseRestClient extends DB {
     String deleteQuery = "DELETE FROM `" + bucketName + "` USE KEYS [$1]";
     JsonArray args = new JsonArray();
     args.add(formatId(table, key));
-    return query(deleteQuery, args.toString());
+    return query(deleteQuery, args);
   }
 
   @Override
@@ -150,7 +147,7 @@ public class CouchbaseRestClient extends DB {
     JsonArray args = new JsonArray();
     args.add(formatId(table, startkey));
     args.add(recordcount);
-    Status s = query(scanQuery, args.toString());
+    Status s = query(scanQuery, args);
     return s;
 
   }
@@ -200,9 +197,10 @@ public class CouchbaseRestClient extends DB {
     return toReturn.substring(0, toReturn.length() - 1);
   }
 
-  private Status query(String query, String args) {
+  private Status query(String query, JsonArray args) {
     try {
       List<NameValuePair> nvps = new ArrayList<>();
+      String jsonData = "";
 
       if (adhoc) {
         if (!prepareCache.containsKey(query)) {
@@ -211,16 +209,19 @@ public class CouchbaseRestClient extends DB {
           }
         }
         Map<String, String> prepared = prepareCache.get(query);
-        nvps.add(new BasicNameValuePair("prepared", prepared.get("name")));
-        nvps.add(new BasicNameValuePair("encoded_plan", prepared.get("encoded_plan")));
+        JsonObject obj = new JsonObject();
+        obj.addProperty("prepared", prepared.get("name").toString());
+        obj.addProperty("encoded_plan", prepared.get("encoded_plan").toString());
+        obj.add("args", args);
+        jsonData = obj.toString();
       } else {
         nvps.add(new BasicNameValuePair("statement", query));
+        nvps.add(new BasicNameValuePair("args", args.toString()));
       }
-      nvps.add(new BasicNameValuePair("args", args));
+
       nvps.add(new BasicNameValuePair("timeout", Integer.toString(QUERY_TIMEOUT) + "s"));
       nvps.add(new BasicNameValuePair("max_parallelism", Integer.toString(maxParallelism)));
-
-      JsonObject obj = executeRequest(nvps);
+      JsonObject obj = executeRequest(nvps, jsonData);
 
       if (obj != null) {
         if (obj.has("errors")) {
@@ -243,12 +244,11 @@ public class CouchbaseRestClient extends DB {
     try {
       List<NameValuePair> nvps = new ArrayList<>();
       nvps.add(new BasicNameValuePair("statement", "PREPARE " + query));
-      JsonObject obj = executeRequest(nvps);
+      JsonObject obj = executeRequest(nvps, "");
 
       if (obj != null && obj.has("results")) {
         JsonArray arr = obj.getAsJsonArray("results");
         JsonObject results = (JsonObject) arr.get(0);
-        System.out.print(arr.toString());
 
         Map<String, String> prepared = new HashMap<>();
         prepared.put("name", results.get("name").getAsString());
@@ -264,10 +264,19 @@ public class CouchbaseRestClient extends DB {
     return true;
   }
 
-  private JsonObject executeRequest(List<NameValuePair> nvps) throws DBException {
-    HttpPost httpPost = new HttpPost("http://" + getN1QLHost() + ":" + Integer.toString(N1QL_PORT) + "/query");
+  private JsonObject executeRequest(List<NameValuePair> nvps, String jsonData) throws DBException {
+    HttpPost httpPost = new HttpPost("http://" + getN1QLHost() + ":" + Integer.toString(N1QL_PORT) + "/query/service");
+
+    httpPost.setHeader("Accept", "application/json");
+    httpPost.setHeader("Accept-Encoding", "*/*");
     try {
-      httpPost.setEntity(new UrlEncodedFormEntity(nvps));
+      if (jsonData != "") {
+        httpPost.setHeader("Content-type", "application/json");
+        httpPost.setEntity(new StringEntity(jsonData));
+      } else {
+        httpPost.setHeader("Content-type", "application/x-www-form-urlencoded; charset=UTF-8");
+        httpPost.setEntity(new UrlEncodedFormEntity(nvps));
+      }
     } catch (UnsupportedEncodingException ex) {
       throw new DBException("Unsupported encoding exception" + ex.getMessage());
     }
@@ -279,9 +288,9 @@ public class CouchbaseRestClient extends DB {
       JsonReader jsonReader = new JsonReader(new InputStreamReader(entity.getContent()));
       Object obj = jsonParser.parse(jsonReader);
       if (statusCode != 200) {
+        System.out.println(obj.toString());
         String msg = "Query rest call returned a not OK status: " + statusCode;
-        System.out.print(msg);
-        throw new DBException(msg);
+        throw new DBException(msg + ":" + response.getStatusLine());
       }
       ht.close();
       return (JsonObject) obj;
