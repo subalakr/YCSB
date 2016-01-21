@@ -18,6 +18,7 @@
 package com.yahoo.ycsb.db;
 
 import com.google.gson.stream.JsonReader;
+import com.yahoo.ycsb.*;
 import org.apache.http.*;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
@@ -31,10 +32,6 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonParser;
 
-import com.yahoo.ycsb.ByteIterator;
-import com.yahoo.ycsb.DB;
-import com.yahoo.ycsb.DBException;
-import com.yahoo.ycsb.Status;
 import org.apache.http.message.BasicNameValuePair;
 
 import java.io.*;
@@ -77,9 +74,6 @@ public class CouchbaseRestClient extends DB {
   private boolean adhoc;
   private int maxParallelism;
   private String[] n1qlhosts;
-  private ArrayList<HttpRoute> httpRoutes;
-  private PoolingHttpClientConnectionManager httpConnMgr;
-  private CloseableHttpClient httpClient;
   private Map<String, Map<String, String>> prepareCache;
   private Gson gson;
   private JsonParser jsonParser;
@@ -91,7 +85,6 @@ public class CouchbaseRestClient extends DB {
     adhoc = props.getProperty(ADHOC_PROPOERTY, "false").equals("true");
     maxParallelism = Integer.parseInt(props.getProperty(MAX_PARALLEL_PROPERTY, "1"));
     n1qlhosts = props.getProperty(N1QLHOSTS_PROPERTY, "127.0.0.1").split(",");
-    httpClient = HttpClients.createDefault();
     prepareCache = new HashMap<String, Map<String, String>>();
     gson = new Gson();
     jsonParser = new JsonParser();
@@ -99,11 +92,6 @@ public class CouchbaseRestClient extends DB {
 
   @Override
   public void cleanup() throws DBException {
-    try {
-      httpClient.close();
-    } catch (IOException ex) {
-      System.out.println("IOException thrown" + ex.getMessage());
-    }
   }
 
   @Override
@@ -162,7 +150,8 @@ public class CouchbaseRestClient extends DB {
     JsonArray args = new JsonArray();
     args.add(formatId(table, startkey));
     args.add(recordcount);
-    return query(scanQuery, args.toString());
+    Status s = query(scanQuery, args.toString());
+    return s;
 
   }
 
@@ -202,7 +191,10 @@ public class CouchbaseRestClient extends DB {
 
     StringBuilder sb = new StringBuilder();
     for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
-      sb.append(entry.getKey()).append("=\"").append(entry.getValue().toString()).append("\",");
+      String raw = entry.getValue().toString();
+      String escaped = raw.replace("\"", "\\\"").replace("\'", "\\\'");
+      sb.append(entry.getKey()).append("=\"").append(escaped).append("\" ");
+
     }
     String toReturn = sb.toString();
     return toReturn.substring(0, toReturn.length() - 1);
@@ -224,12 +216,12 @@ public class CouchbaseRestClient extends DB {
       } else {
         nvps.add(new BasicNameValuePair("statement", query));
       }
-      System.out.println(args);
       nvps.add(new BasicNameValuePair("args", args));
-      //nvps.add(new BasicNameValuePair("timeout", Integer.toString(QUERY_TIMEOUT) + "s"));
-      //nvps.add(new BasicNameValuePair("max_parallelism", Integer.toString(maxParallelism)));
+      nvps.add(new BasicNameValuePair("timeout", Integer.toString(QUERY_TIMEOUT) + "s"));
+      nvps.add(new BasicNameValuePair("max_parallelism", Integer.toString(maxParallelism)));
 
       JsonObject obj = executeRequest(nvps);
+
       if (obj != null) {
         if (obj.has("errors")) {
           System.out.println("Errors:" + obj.get("errors").toString());
@@ -253,13 +245,17 @@ public class CouchbaseRestClient extends DB {
       nvps.add(new BasicNameValuePair("statement", "PREPARE " + query));
       JsonObject obj = executeRequest(nvps);
 
-      if (obj != null && obj.has("name") && obj.has("encoded_plan")) {
+      if (obj != null && obj.has("results")) {
+        JsonArray arr = obj.getAsJsonArray("results");
+        JsonObject results = (JsonObject) arr.get(0);
+        System.out.print(arr.toString());
+
         Map<String, String> prepared = new HashMap<>();
-        prepared.put("name", obj.get("name").getAsString());
-        prepared.put("encoded_plan", obj.get("encoded_plan").getAsString());
+        prepared.put("name", results.get("name").getAsString());
+        prepared.put("encoded_plan", results.get("encoded_plan").getAsString());
         prepareCache.put(query, prepared);
       } else {
-        throw new DBException("Prepare request got a bad response" + obj.getAsString());
+        throw new DBException("Prepare request got a bad response" + obj.toString());
       }
     } catch (DBException ex) {
       System.out.print("Prepare execution failed \n" + ex.getMessage() + "\n Stack trace\t" + ex.getStackTrace());
@@ -276,17 +272,18 @@ public class CouchbaseRestClient extends DB {
       throw new DBException("Unsupported encoding exception" + ex.getMessage());
     }
     try {
-      CloseableHttpResponse response = this.httpClient.execute(httpPost);
+      CloseableHttpClient ht = HttpClients.createDefault();
+      CloseableHttpResponse response = ht.execute(httpPost);
       HttpEntity entity = response.getEntity();
       int statusCode = response.getStatusLine().getStatusCode();
       JsonReader jsonReader = new JsonReader(new InputStreamReader(entity.getContent()));
       Object obj = jsonParser.parse(jsonReader);
-
       if (statusCode != 200) {
         String msg = "Query rest call returned a not OK status: " + statusCode;
         System.out.print(msg);
         throw new DBException(msg);
       }
+      ht.close();
       return (JsonObject) obj;
     } catch (Exception ex) {
       throw new DBException(ex.getMessage() + ex.getStackTrace());
