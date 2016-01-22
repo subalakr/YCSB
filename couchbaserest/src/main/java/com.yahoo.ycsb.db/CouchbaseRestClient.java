@@ -61,7 +61,6 @@ public class CouchbaseRestClient extends DB {
   public static final String ADHOC_PROPOERTY = "couchbase.adhoc";
   public static final String MAX_PARALLEL_PROPERTY = "couchbase.maxParallelism";
   public static final String N1QLHOSTS_PROPERTY = "couchbase.n1qlhosts";
-  public static final String UPSERT_PROPERTY = "couchbase.upsert";
 
   public static final int N1QL_PORT = 8093;
   public static final int QUERY_TIMEOUT = 75000;
@@ -74,6 +73,7 @@ public class CouchbaseRestClient extends DB {
   private Map<String, Map<String, String>> prepareCache;
   private Gson gson;
   private JsonParser jsonParser;
+  private CloseableHttpClient ht;
 
   @Override
   public void init() throws DBException {
@@ -85,10 +85,16 @@ public class CouchbaseRestClient extends DB {
     prepareCache = new HashMap<String, Map<String, String>>();
     gson = new Gson();
     jsonParser = new JsonParser();
+    ht = HttpClients.createDefault();
   }
 
   @Override
   public void cleanup() throws DBException {
+    try {
+      ht.close();
+    } catch (Exception ex) {
+      System.out.println(ex.getMessage());
+    }
   }
 
   @Override
@@ -115,21 +121,12 @@ public class CouchbaseRestClient extends DB {
 
   @Override
   public Status insert(String table, String key, HashMap<String, ByteIterator> values) {
-    String insertQuery = "INSERT INTO `" + bucketName + "`(KEY,VALUE) VALUES ($1,$2)";
+    String insertQuery = "UPSERT INTO `" + bucketName + "`(KEY,VALUE) VALUES ($1,$2)";
     JsonArray args = new JsonArray();
     args.add(formatId(table, key));
     args.add(encodeIntoJson(values));
     return query(insertQuery, args);
   }
-
-  private Status upsert(String table, String key, HashMap<String, ByteIterator> values) {
-    String upsertQuery = "UPSERT INTO `" + bucketName + "`(KEY,VALUE) VALUES ($1,$2)";
-    JsonArray args = new JsonArray();
-    args.add(formatId(table, key));
-    args.add(encodeIntoJson(values));
-    return query(upsertQuery, args);
-  }
-
 
   @Override
   public Status delete(final String table, final String key) {
@@ -154,7 +151,7 @@ public class CouchbaseRestClient extends DB {
 
   private static String joinSet(final String bucket, final Set<String> fields) {
     if (fields == null || fields.isEmpty()) {
-      return "`" + bucket + "`.*";
+      return "*";
     }
     StringBuilder builder = new StringBuilder();
     for (String f : fields) {
@@ -202,7 +199,7 @@ public class CouchbaseRestClient extends DB {
       List<NameValuePair> nvps = new ArrayList<>();
       String jsonData = "";
 
-      if (adhoc) {
+      if (!adhoc) {
         if (!prepareCache.containsKey(query)) {
           if (!executePrepare(query)) {
             return Status.ERROR;
@@ -258,7 +255,7 @@ public class CouchbaseRestClient extends DB {
         throw new DBException("Prepare request got a bad response" + obj.toString());
       }
     } catch (DBException ex) {
-      System.out.print("Prepare execution failed \n" + ex.getMessage() + "\n Stack trace\t" + ex.getStackTrace());
+      ex.printStackTrace();
       return false;
     }
     return true;
@@ -281,18 +278,20 @@ public class CouchbaseRestClient extends DB {
       throw new DBException("Unsupported encoding exception" + ex.getMessage());
     }
     try {
-      CloseableHttpClient ht = HttpClients.createDefault();
       CloseableHttpResponse response = ht.execute(httpPost);
       HttpEntity entity = response.getEntity();
       int statusCode = response.getStatusLine().getStatusCode();
       JsonReader jsonReader = new JsonReader(new InputStreamReader(entity.getContent()));
       Object obj = jsonParser.parse(jsonReader);
       if (statusCode != 200) {
-        System.out.println(obj.toString());
         String msg = "Query rest call returned a not OK status: " + statusCode;
-        throw new DBException(msg + ":" + response.getStatusLine());
+        if (obj != null) {
+          System.out.println(obj.toString());
+        }
+        throw new DBException(msg + response.getStatusLine());
       }
-      ht.close();
+      response.close();
+
       return (JsonObject) obj;
     } catch (Exception ex) {
       throw new DBException(ex.getMessage() + ex.getStackTrace());
