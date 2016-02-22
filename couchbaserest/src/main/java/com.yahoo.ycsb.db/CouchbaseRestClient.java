@@ -36,23 +36,10 @@ import java.io.*;
 import java.util.*;
 
 /**
- * A class that wraps the 1.x CouchbaseClient to allow it to be interfaced with YCSB.
- * This class extends {@link DB} and implements the database interface used by YCSB client.
- * <p/>
- * <p> The following options must be passed when using this database client.
- * <p/>
- * <ul>
- * <li><b>couchbase.host=127.0.0.1</b> The hostname from one server.</li>
- * <li><b>couchbase.bucket=default</b> The bucket name to use./li>
- * <li><b>couchbase.password=</b> The password of the bucket.</li>
- * <li><b>couchbase.syncMutationResponse=true</b> If mutations should wait for the response to complete.</li>
- * <li><b>couchbase.persistTo=0</b> Persistence durability requirement</li>
- * <li><b>couchbase.replicateTo=0</b> Replication durability requirement</li>
- * <li><b>couchbase.upsert=false</b> Use upsert instead of insert or replace.</li>
- * <li><b>couchbase.adhoc=false</b> If set to true, prepared statements are not used.</li>
- * <li><b>couchbase.kv=true</b> If set to false, mutation operations will also be performed through N1QL.</li>
- * <li><b>couchbase.maxParallelism=1</b> The server parallelism for all n1ql queries.</li>
- * </ul>
+ * A couchbase workload runner using the n1ql rest api
+ * couchbase.bucket Couchbase bucket to connect
+ * couchbase.maxParallelism  Number of the cpu cores that can be used by the N1QL Server
+ * couchbase.n1qlhosts Comma separated N1QL hosts
  *
  * @author Subhashni Balakrishan
  */
@@ -75,6 +62,12 @@ public class CouchbaseRestClient extends DB {
   private JsonParser jsonParser;
   private CloseableHttpClient ht;
 
+
+  /**
+   * Initialize any state for this DB.
+   * Called once per DB instance; there is one DB instance per client thread.
+   */
+
   @Override
   public void init() throws DBException {
     Properties props = getProperties();
@@ -88,6 +81,10 @@ public class CouchbaseRestClient extends DB {
     ht = HttpClients.createDefault();
   }
 
+  /**
+   * Cleanup any state for this DB.
+   * Called once per DB instance; there is one DB instance per client thread.
+   */
   @Override
   public void cleanup() throws DBException {
     try {
@@ -263,9 +260,9 @@ public class CouchbaseRestClient extends DB {
 
   private JsonObject executeRequest(List<NameValuePair> nvps, String jsonData) throws DBException {
     HttpPost httpPost = new HttpPost("http://" + getN1QLHost() + ":" + Integer.toString(N1QL_PORT) + "/query/service");
-
     httpPost.setHeader("Accept", "application/json");
     httpPost.setHeader("Accept-Encoding", "*/*");
+
     try {
       if (jsonData != "") {
         httpPost.setHeader("Content-type", "application/json");
