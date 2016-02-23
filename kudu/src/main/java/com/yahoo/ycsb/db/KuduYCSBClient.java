@@ -134,7 +134,8 @@ public class KuduYCSBClient extends com.yahoo.ycsb.DB {
 
     client = new KuduClient.KuduClientBuilder(masterAddresses)
         .defaultSocketReadTimeoutMs(DEFAULT_SLEEP)
-        .defaultOperationTimeoutMs(DEFAULT_SLEEP).build();
+        .defaultOperationTimeoutMs(DEFAULT_SLEEP)
+        .defaultAdminOperationTimeoutMs(DEFAULT_SLEEP).build();
     if (debug) {
       System.out.println("Connecting to the masters at " + masterAddresses);
     }
@@ -156,7 +157,7 @@ public class KuduYCSBClient extends com.yahoo.ycsb.DB {
     }
     schema = new Schema(columns);
 
-    CreateTableBuilder builder = new CreateTableBuilder();
+    CreateTableOptions builder = new CreateTableOptions();
     builder.setNumReplicas(numReplicas);
     // create n-1 split keys, which will end up being n tablets master-side
     for (int i = 1; i < numTablets + 0; i++) {

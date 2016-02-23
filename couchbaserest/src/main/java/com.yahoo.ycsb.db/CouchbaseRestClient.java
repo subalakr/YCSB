@@ -30,42 +30,54 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonParser;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.message.BasicNameValuePair;
-
+import org.apache.http.conn.ConnectionKeepAliveStrategy;
+import org.apache.http.message.BasicHeaderElementIterator;
+import org.apache.http.protocol.HTTP;
+import org.apache.http.protocol.HttpContext;
+import org.apache.http.impl.DefaultConnectionReuseStrategy;
 import java.io.*;
 import java.util.*;
+import org.apache.http.util.EntityUtils;
 
 /**
  * A couchbase workload runner using the n1ql rest api
  * couchbase.bucket Couchbase bucket to connect
  * couchbase.maxParallelism  Number of the cpu cores that can be used by the N1QL Server
  * couchbase.n1qlhosts Comma separated N1QL hosts
+ * couchbase.queryEndpoints Max number of connection in pool
+ * couchbase.adhoc Use prepared queries support
  *
  * @author Subhashni Balakrishan
  */
 public class CouchbaseRestClient extends DB {
+  private static final Object INIT_COORDINATOR = new Object();
+
   public static final String BUCKET_PROPERTY = "couchbase.bucket";
   public static final String ADHOC_PROPOERTY = "couchbase.adhoc";
   public static final String MAX_PARALLEL_PROPERTY = "couchbase.maxParallelism";
   public static final String N1QLHOSTS_PROPERTY = "couchbase.n1qlhosts";
+  public static final String N1QL_QUERYENDPOINTS = "couchbase.queryEndpoints";
 
   public static final int N1QL_PORT = 8093;
   public static final int QUERY_TIMEOUT = 75000;
 
   private String bucketName;
-
   private boolean adhoc;
   private int maxParallelism;
   private String[] n1qlhosts;
   private Map<String, Map<String, String>> prepareCache;
   private Gson gson;
   private JsonParser jsonParser;
-  private CloseableHttpClient ht;
-
+  private CloseableHttpClient ht = null;
+  private PoolingHttpClientConnectionManager connectionManager = null;
+  private int maxQueryEndPoints;
+  private HttpPost httpPost;
 
   /**
    * Initialize any state for this DB.
-   * Called once per DB instance; there is one DB instance per client thread.
+   * Called once per DB instance;
    */
 
   @Override
@@ -76,19 +88,51 @@ public class CouchbaseRestClient extends DB {
     maxParallelism = Integer.parseInt(props.getProperty(MAX_PARALLEL_PROPERTY, "1"));
     n1qlhosts = props.getProperty(N1QLHOSTS_PROPERTY, "127.0.0.1").split(",");
     prepareCache = new HashMap<String, Map<String, String>>();
+    maxQueryEndPoints = Integer.parseInt(props.getProperty(N1QL_QUERYENDPOINTS, "100"));
     gson = new Gson();
     jsonParser = new JsonParser();
-    ht = HttpClients.createDefault();
+
+    ConnectionKeepAliveStrategy keepAliveStrategy = new ConnectionKeepAliveStrategy() {
+      @Override
+      public long getKeepAliveDuration(HttpResponse response, HttpContext context) {
+        // Honor 'keep-alive' header
+        HeaderElementIterator it = new BasicHeaderElementIterator(
+          response.headerIterator(HTTP.CONN_KEEP_ALIVE));
+        while (it.hasNext()) {
+          HeaderElement he = it.nextElement();
+          String param = he.getName();
+          String value = he.getValue();
+          if (value != null && param.equalsIgnoreCase("timeout")) {
+            try {
+              return Long.parseLong(value) * 1000;
+            } catch(NumberFormatException ignore) {
+            }
+          }
+        }
+        return 1000 * 1000 * 1000;
+      }
+
+    };
+    //use a pooling connection manager so connections can be reused
+    connectionManager = new PoolingHttpClientConnectionManager();
+    connectionManager.setDefaultMaxPerRoute(100);
+
+    ht = HttpClients.custom()
+      .setConnectionManager(connectionManager)
+      .setKeepAliveStrategy(keepAliveStrategy)
+      .setConnectionReuseStrategy(new DefaultConnectionReuseStrategy())
+      .build();
+
   }
 
   /**
    * Cleanup any state for this DB.
-   * Called once per DB instance; there is one DB instance per client thread.
+   * Called once per DB instance;
    */
   @Override
   public void cleanup() throws DBException {
     try {
-      ht.close();
+      connectionManager.shutdown();
     } catch (Exception ex) {
       System.out.println(ex.getMessage());
     }
@@ -259,11 +303,11 @@ public class CouchbaseRestClient extends DB {
   }
 
   private JsonObject executeRequest(List<NameValuePair> nvps, String jsonData) throws DBException {
-    HttpPost httpPost = new HttpPost("http://" + getN1QLHost() + ":" + Integer.toString(N1QL_PORT) + "/query/service");
+    httpPost = new HttpPost("http://" + getN1QLHost() + ":" + Integer.toString(N1QL_PORT) + "/query/service");
     httpPost.setHeader("Accept", "application/json");
     httpPost.setHeader("Accept-Encoding", "*/*");
-
     try {
+
       if (jsonData != "") {
         httpPost.setHeader("Content-type", "application/json");
         httpPost.setEntity(new StringEntity(jsonData));
@@ -276,6 +320,7 @@ public class CouchbaseRestClient extends DB {
     }
     try {
       CloseableHttpResponse response = ht.execute(httpPost);
+
       HttpEntity entity = response.getEntity();
       int statusCode = response.getStatusLine().getStatusCode();
       JsonReader jsonReader = new JsonReader(new InputStreamReader(entity.getContent()));
@@ -287,11 +332,13 @@ public class CouchbaseRestClient extends DB {
         }
         throw new DBException(msg + response.getStatusLine());
       }
+      EntityUtils.consume(entity);
       response.close();
-
       return (JsonObject) obj;
     } catch (Exception ex) {
       throw new DBException(ex.getMessage() + ex.getStackTrace());
+    } finally {
+      httpPost.releaseConnection();
     }
   }
 }

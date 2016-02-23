@@ -16,13 +16,18 @@
 # LICENSE file.
 #
 
-import argparse
+import errno
 import fnmatch
 import io
 import os
 import shlex
 import sys
 import subprocess
+try:
+    import argparse
+except ImportError:
+    print >> sys.stderr, '[ERROR] argparse not found. Try installing it via "pip".'
+    raise
 
 BASE_URL = "https://github.com/brianfrankcooper/YCSB/tree/master/"
 COMMANDS = {
@@ -68,12 +73,14 @@ DATABASES = {
     "jdbc"         : "com.yahoo.ycsb.db.JdbcDBClient",
     "kudu"         : "com.yahoo.ycsb.db.KuduYCSBClient",
     "mapkeeper"    : "com.yahoo.ycsb.db.MapKeeperClient",
+    "memcached"    : "com.yahoo.ycsb.db.MemcachedClient",
     "mongodb"      : "com.yahoo.ycsb.db.MongoDbClient",
     "mongodb-async": "com.yahoo.ycsb.db.AsyncMongoDbClient",
     "nosqldb"      : "com.yahoo.ycsb.db.NoSqlDbClient",
     "orientdb"     : "com.yahoo.ycsb.db.OrientDBClient",
     "redis"        : "com.yahoo.ycsb.db.RedisClient",
     "s3"           : "com.yahoo.ycsb.db.S3Client",
+    "solr"         : "com.yahoo.ycsb.db.SolrClient",
     "tarantool"    : "com.yahoo.ycsb.db.TarantoolClient",
     "voldemort"    : "com.yahoo.ycsb.db.VoldemortClient"
 }
@@ -113,6 +120,13 @@ def usage():
 
     return output.getvalue()
 
+def check_output(cmd):
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    stdout, _ = p.communicate()
+    if p.returncode:
+        raise subprocess.CalledProcessError(p.returncode, cmd)
+    return stdout
+
 def debug(message):
     print >> sys.stderr, "[DEBUG] ", message
 
@@ -128,7 +142,6 @@ def find_jars(dir, glob='*.jar'):
         for filename in fnmatch.filter(filenames, glob):
             jars.append(os.path.join(dirpath, filename))
     return jars
-
 
 def get_ycsb_home():
     dir = os.path.abspath(os.path.dirname(sys.argv[0]))
@@ -149,11 +162,11 @@ def get_classpath_from_maven(module):
     try:
         debug("Running 'mvn -pl com.yahoo.ycsb:" + module + " -am package -DskipTests "
               "dependency:build-classpath -DincludeScope=compile -Dmdep.outputFilterFile=true'")
-        mvn_output = subprocess.check_output(["mvn", "-pl", "com.yahoo.ycsb:" + module,
-                                              "-am", "package", "-DskipTests",
-                                              "dependency:build-classpath",
-                                              "-DincludeScope=compile",
-                                              "-Dmdep.outputFilterFile=true"])
+        mvn_output = check_output(["mvn", "-pl", "com.yahoo.ycsb:" + module,
+                                   "-am", "package", "-DskipTests",
+                                   "dependency:build-classpath",
+                                   "-DincludeScope=compile",
+                                   "-Dmdep.outputFilterFile=true"])
         # the above outputs a "classpath=/path/tojar:/path/to/other/jar" for each module
         # the last module will be the datastore binding
         line = [x for x in mvn_output.splitlines() if x.startswith("classpath=")][-1:]
@@ -195,6 +208,13 @@ def main():
 
     # Classpath set up
     binding = args.database.split("-")[0]
+
+    # Deprecation message for the entire cassandra-binding
+    if binding == "cassandra":
+        warn("The 'cassandra-7', 'cassandra-8', 'cassandra-10', and "
+             "cassandra-cql' clients are deprecated. If you are using "
+             "Cassandra 2.X try using the 'cassandra2-cql' client instead.")
+
     if is_distribution():
         db_dir = os.path.join(ycsb_home, binding + "-binding")
         # include top-level conf for when we're a binding-specific artifact.
@@ -228,8 +248,14 @@ def main():
     if command:
         ycsb_command.append(command)
     print >> sys.stderr, " ".join(ycsb_command)
-    return subprocess.call(ycsb_command)
-
+    try:
+        return subprocess.call(ycsb_command)
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            error('Command failed. Is java installed and on your PATH?')
+            return 1
+        else:
+            raise
 
 if __name__ == '__main__':
     sys.exit(main())

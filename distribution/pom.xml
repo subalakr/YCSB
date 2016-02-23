@@ -21,7 +21,7 @@ LICENSE file.
   <parent>
     <groupId>com.yahoo.ycsb</groupId>
     <artifactId>root</artifactId>
-    <version>0.6.0-SNAPSHOT</version>
+    <version>0.7.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>ycsb</artifactId>
@@ -121,6 +121,11 @@ LICENSE file.
     </dependency>
     <dependency>
       <groupId>com.yahoo.ycsb</groupId>
+      <artifactId>memcached-binding</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.yahoo.ycsb</groupId>
       <artifactId>mongodb-binding</artifactId>
       <version>${project.version}</version>
     </dependency>
@@ -141,16 +146,19 @@ LICENSE file.
     </dependency>
     <dependency>
       <groupId>com.yahoo.ycsb</groupId>
+      <artifactId>solr-binding</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.yahoo.ycsb</groupId>
       <artifactId>tarantool-binding</artifactId>
       <version>${project.version}</version>
     </dependency>
-<!--
     <dependency>
       <groupId>com.yahoo.ycsb</groupId>
       <artifactId>voldemort-binding</artifactId>
       <version>${project.version}</version>
     </dependency>
--->
   </dependencies>
   <build>
     <plugins>

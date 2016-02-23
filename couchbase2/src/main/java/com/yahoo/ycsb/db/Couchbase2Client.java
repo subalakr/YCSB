@@ -17,6 +17,8 @@
 
 package com.yahoo.ycsb.db;
 
+import com.couchbase.client.core.logging.CouchbaseLogger;
+import com.couchbase.client.core.logging.CouchbaseLoggerFactory;
 import com.couchbase.client.java.Bucket;
 import com.couchbase.client.java.Cluster;
 import com.couchbase.client.java.CouchbaseCluster;
@@ -27,7 +29,6 @@ import com.couchbase.client.java.document.json.JsonArray;
 import com.couchbase.client.java.document.json.JsonObject;
 import com.couchbase.client.java.env.CouchbaseEnvironment;
 import com.couchbase.client.java.env.DefaultCouchbaseEnvironment;
-import com.couchbase.client.java.error.TemporaryFailureException;
 import com.couchbase.client.java.query.N1qlParams;
 import com.couchbase.client.java.query.N1qlQuery;
 import com.couchbase.client.java.query.N1qlQueryResult;
@@ -65,11 +66,21 @@ import java.util.concurrent.TimeUnit;
  * <li><b>couchbase.adhoc=false</b> If set to true, prepared statements are not used.</li>
  * <li><b>couchbase.kv=true</b> If set to false, mutation operations will also be performed through N1QL.</li>
  * <li><b>couchbase.maxParallelism=1</b> The server parallelism for all n1ql queries.</li>
+ * <li><b>couchbase.kvEndpoints=1</b> The number of KV sockets to open per server.</li>
+ * <li><b>couchbase.queryEndpoints=5</b> The number of N1QL Query sockets to open per server.</li>
  * </ul>
  *
  * @author Michael Nitschinger
  */
 public class Couchbase2Client extends DB {
+
+    private static final CouchbaseLogger LOGGER = CouchbaseLoggerFactory.getInstance(Couchbase2Client.class);
+
+    private static final Object INIT_COORDINATOR = new Object();
+    private static volatile int NUM_THREADS = 0;
+    private static volatile CouchbaseEnvironment ENV = null;
+    private static volatile Cluster CLUSTER = null;
+    private static volatile Bucket BUCKET = null;
 
     public static final String HOST_PROPERTY = "couchbase.host";
     public static final String BUCKET_PROPERTY = "couchbase.bucket";
@@ -81,12 +92,10 @@ public class Couchbase2Client extends DB {
     public static final String ADHOC_PROPOERTY = "couchbase.adhoc";
     public static final String KV_PROPERTY = "couchbase.kv";
     public static final String MAX_PARALLEL_PROPERTY = "couchbase.maxParallelism";
+    public static final String KV_ENDPOINTS = "couchbase.kvEndpoints";
+    public static final String QUERY_ENDPOINTS = "couchbase.queryEndpoints";
 
     private String bucketName;
-    private Bucket bucket;
-    private Cluster cluster;
-    private CouchbaseEnvironment env;
-
     private boolean upsert;
     private PersistTo persistTo;
     private ReplicateTo replicateTo;
@@ -95,14 +104,15 @@ public class Couchbase2Client extends DB {
     private boolean adhoc;
     private boolean kv;
     private int maxParallelism;
-    private final int MAX_RETRIES = 5;
-
+    private String host;
+    private int kvEndpoints;
+    private int queryEndpoints;
 
     @Override
     public void init() throws DBException {
         Properties props = getProperties();
 
-        String host = props.getProperty(HOST_PROPERTY, "127.0.0.1");
+        host = props.getProperty(HOST_PROPERTY, "127.0.0.1");
         bucketName = props.getProperty(BUCKET_PROPERTY, "default");
         String bucketPassword = props.getProperty(PASSWORD_PROPERTY, "");
 
@@ -113,19 +123,33 @@ public class Couchbase2Client extends DB {
         adhoc = props.getProperty(ADHOC_PROPOERTY, "false").equals("true");
         kv = props.getProperty(KV_PROPERTY, "true").equals("true");
         maxParallelism = Integer.parseInt(props.getProperty(MAX_PARALLEL_PROPERTY, "1"));
+        kvEndpoints = Integer.parseInt(props.getProperty(KV_ENDPOINTS, "1"));
+        queryEndpoints = Integer.parseInt(props.getProperty(QUERY_ENDPOINTS, "5"));
+    
 
         try {
-            env = DefaultCouchbaseEnvironment
-                .builder()
-                .queryEndpoints(5)
-                .build();
-            cluster = CouchbaseCluster.create(env, host);
-            bucket = cluster.openBucket(bucketName, bucketPassword);
+            synchronized (INIT_COORDINATOR) {
+                NUM_THREADS++;
+                if (ENV == null) {
+                    ENV = DefaultCouchbaseEnvironment
+                        .builder()
+                        .queryEndpoints(queryEndpoints)
+                        .kvEndpoints(kvEndpoints)
+                        .build();
+                }
+                if (CLUSTER == null) {
+                    CLUSTER = CouchbaseCluster.create(ENV, host);
+                }
+                if (BUCKET == null) {
+                    BUCKET = CLUSTER.openBucket(bucketName, bucketPassword);
+                    logSettings();
+                }
+            }
 
-            kvTimeout = bucket.environment().kvTimeout();
+            kvTimeout = BUCKET.environment().kvTimeout();
         } catch (Exception ex) {
-            throw new DBException("Could not connect to Couchbase Bucket.", ex);
 
+            throw new DBException("Could not connect to Couchbase Bucket.", ex);
         }
 
         if (!kv && !syncMutResponse) {
@@ -133,10 +157,33 @@ public class Couchbase2Client extends DB {
         }
     }
 
+    private void logSettings() {
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("host = " + host);
+        sb.append(", bucket = " + bucketName);
+        sb.append(", upsert = " + upsert);
+        sb.append(", persistTo = " + persistTo);
+        sb.append(", replicateTo = " + replicateTo);
+        sb.append(", syncMutResponse = " + syncMutResponse);
+        sb.append(", adhoc = " + adhoc);
+        sb.append(", kv = " + kv);
+        sb.append(", maxParallelism = " + maxParallelism);
+        sb.append(", queryEndpoints = " + queryEndpoints);
+        sb.append(", kvEndpoints = " + kvEndpoints);
+
+        LOGGER.info("=== Using Params: " + sb.toString());
+    }
+
     @Override
     public void cleanup() throws DBException {
-        cluster.disconnect();
-        env.shutdownAsync().toBlocking().single();
+        synchronized (INIT_COORDINATOR) {
+            NUM_THREADS--;
+            if (NUM_THREADS == 0) {
+                CLUSTER.disconnect();
+                ENV.shutdownAsync().toBlocking().single();
+            }
+        }
     }
 
     @Override
@@ -145,16 +192,15 @@ public class Couchbase2Client extends DB {
         try {
             JsonObject content;
             if (kv) {
-                JsonDocument loaded = bucket.get(formatId(table, key));
+                JsonDocument loaded = BUCKET.get(formatId(table, key));
                 if (loaded == null) {
                     return Status.NOT_FOUND;
                 }
                 content = loaded.content();
             } else {
-
                 String readQuery = "SELECT " + joinSet(bucketName, fields) + " FROM `"
                   + bucketName + "` USE KEYS [$1]";
-                N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
+                N1qlQueryResult queryResult = BUCKET.query(N1qlQuery.parameterized(
                   readQuery,
                   JsonArray.from(formatId(table, key)),
                   N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
@@ -172,11 +218,15 @@ public class Couchbase2Client extends DB {
                 }
 
                 content = rows.get(0).value();
+                if (fields == null) {
+                    content = content.getObject(bucketName);
+                }
             }
 
             fields = fields == null || fields.isEmpty() ? content.getNames() : fields;
             for (String field : fields) {
-                result.put(field, new StringByteIterator(content.getString(field)));
+                Object value = content.get(field);
+                result.put(field, new StringByteIterator(value != null ? value.toString() : ""));
             }
             return Status.OK;
         } catch (Exception ex) {
@@ -194,7 +244,7 @@ public class Couchbase2Client extends DB {
                     return upsert(table, key, values);
                 }
 
-                waitForMutationResponse(bucket.async().replace(
+                waitForMutationResponse(BUCKET.async().replace(
                   JsonDocument.create(formatId(table, key), encodeIntoJson(values)),
                   persistTo,
                   replicateTo
@@ -203,7 +253,7 @@ public class Couchbase2Client extends DB {
                 String fields = encodeN1qlFields(values);
                 String updateQuery = "UPDATE `" + bucketName + "` USE KEYS [$1] SET " + fields;
 
-                N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
+                N1qlQueryResult queryResult = BUCKET.query(N1qlQuery.parameterized(
                   updateQuery,
                   JsonArray.from(formatId(table, key)),
                   N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
@@ -229,7 +279,9 @@ public class Couchbase2Client extends DB {
 
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
-            sb.append(entry.getKey()).append("=\"").append(entry.getValue().toString()).append("\",");
+            String raw = entry.getValue().toString();
+            String escaped = raw.replace("\"", "\\\"").replace("\'", "\\\'");
+            sb.append(entry.getKey()).append("=\"").append(escaped).append("\" ");
         }
         String toReturn = sb.toString();
         return toReturn.substring(0, toReturn.length() - 1);
@@ -237,21 +289,21 @@ public class Couchbase2Client extends DB {
 
     @Override
     public Status insert(String table, String key, HashMap<String, ByteIterator> values) {
+        if (upsert) {
+            return upsert(table, key, values);
+        }
+
         try {
             if (kv) {
-                if (upsert) {
-                    return upsert(table, key, values);
-                }
-
-                waitForMutationResponse(bucket.async().insert(
-                        JsonDocument.create(formatId(table, key), encodeIntoJson(values)),
-                        persistTo,
-                        replicateTo
+                waitForMutationResponse(BUCKET.async().insert(
+                  JsonDocument.create(formatId(table, key), encodeIntoJson(values)),
+                  persistTo,
+                  replicateTo
                 ));
             } else {
                 String insertQuery = "INSERT INTO `" + bucketName + "`(KEY,VALUE) VALUES ($1,$2)";
 
-                N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
+                N1qlQueryResult queryResult = BUCKET.query(N1qlQuery.parameterized(
                   insertQuery,
                   JsonArray.from(formatId(table, key), encodeIntoJson(values)),
                   N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
@@ -273,7 +325,7 @@ public class Couchbase2Client extends DB {
     private Status upsert(String table, String key, HashMap<String, ByteIterator> values) {
         try {
             if (kv) {
-                waitForMutationResponse(bucket.async().upsert(
+                waitForMutationResponse(BUCKET.async().upsert(
                   JsonDocument.create(formatId(table, key), encodeIntoJson(values)),
                   persistTo,
                   replicateTo
@@ -281,7 +333,7 @@ public class Couchbase2Client extends DB {
             } else {
                 String upsertQuery = "UPSERT INTO `" + bucketName + "`(KEY,VALUE) VALUES ($1,$2)";
 
-                N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
+                N1qlQueryResult queryResult = BUCKET.query(N1qlQuery.parameterized(
                   upsertQuery,
                   JsonArray.from(formatId(table, key), encodeIntoJson(values)),
                   N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
@@ -329,10 +381,10 @@ public class Couchbase2Client extends DB {
     public Status delete(final String table, final String key) {
         try {
             if (kv) {
-                bucket.remove(formatId(table, key));
+                BUCKET.remove(formatId(table, key));
             } else {
                 String deleteQuery = "DELETE FROM `" + bucketName + "` USE KEYS [$1]";
-                N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
+                N1qlQueryResult queryResult = BUCKET.query(N1qlQuery.parameterized(
                   deleteQuery,
                   JsonArray.from(formatId(table, key)),
                   N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
@@ -354,54 +406,46 @@ public class Couchbase2Client extends DB {
     @Override
     public Status scan(String table, String startkey, int recordcount, Set<String> fields,
         Vector<HashMap<String, ByteIterator>> result) {
-        int retry_count;
-        retry:
-        for (retry_count = 0; retry_count < MAX_RETRIES; retry_count++) {
-            try {
-                String scanQuery = "SELECT " + joinSet(bucketName, fields) + " FROM `"
-                        + bucketName + "` WHERE meta().id >= '$1' LIMIT $2";
+        try {
+            String scanQuery = "SELECT " + joinSet(bucketName, fields) + " FROM `"
+              + bucketName + "` WHERE meta().id >= '$1' LIMIT $2";
+            N1qlQueryResult queryResult = BUCKET.query(N1qlQuery.parameterized(
+                scanQuery,
+                JsonArray.from(formatId(table, startkey), recordcount),
+                N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
+            ));
 
-                N1qlQueryResult queryResult = bucket.query(N1qlQuery.parameterized(
-                        scanQuery,
-                        JsonArray.from(formatId(table, startkey), recordcount),
-                        N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
-                ));
-
-
-                if (!queryResult.parseSuccess() || !queryResult.finalSuccess()) {
-                    System.err.println(scanQuery);
-                    System.err.println(queryResult.errors());
-
-                    return Status.ERROR;
-                }
-
-                boolean allFields = fields == null || fields.isEmpty();
-                result.ensureCapacity(recordcount);
-
-                for (N1qlQueryRow row : queryResult) {
-                    JsonObject value = row.value();
-                    fields = allFields ? value.getNames() : fields;
-                    HashMap<String, ByteIterator> tuple = new HashMap<String, ByteIterator>(fields.size());
-                    for (String field : fields) {
-                        tuple.put(field, new StringByteIterator(value.getString(field)));
-                    }
-                    result.add(tuple);
-                }
-                return Status.OK;
-            } catch (TemporaryFailureException ex) {
-                continue retry;
-            } catch (Exception ex) {
-                ex.printStackTrace();
+            if (!queryResult.parseSuccess() || !queryResult.finalSuccess()) {
+                System.err.println(scanQuery);
+                System.err.println(queryResult.errors());
                 return Status.ERROR;
             }
+
+            boolean allFields = fields == null || fields.isEmpty();
+            result.ensureCapacity(recordcount);
+
+            for (N1qlQueryRow row : queryResult) {
+                JsonObject value = row.value();
+                if (fields == null) {
+                    value = value.getObject(bucketName);
+                }
+                Set<String> f = allFields ? value.getNames() : fields;
+                HashMap<String, ByteIterator> tuple = new HashMap<String, ByteIterator>(f.size());
+                for (String field : f) {
+                    tuple.put(field, new StringByteIterator(value.getString(field)));
+                }
+                result.add(tuple);
+            }
+            return Status.OK;
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            return Status.ERROR;
         }
-        System.err.println("Exceeded max retries with tmpfail");
-        return Status.ERROR;
     }
 
     private static String joinSet(final String bucket, final Set<String> fields) {
         if (fields == null || fields.isEmpty()) {
-            return "`" + bucket + "`.*";
+            return "*";
         }
         StringBuilder builder = new StringBuilder();
         for (String f : fields) {
