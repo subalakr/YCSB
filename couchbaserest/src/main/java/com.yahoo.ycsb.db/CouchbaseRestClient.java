@@ -207,7 +207,7 @@ public class CouchbaseRestClient extends DB {
   }
 
   private String getN1QLHost() {
-    int randomSelect = new Random().nextInt(n1qlhosts.length) - 1;
+    int randomSelect = new Random().nextInt(n1qlhosts.length);
     return this.n1qlhosts[randomSelect < 0 ? 0 : randomSelect];
   }
 
