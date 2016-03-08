@@ -115,7 +115,7 @@ public class CouchbaseRestClient extends DB {
     };
     //use a pooling connection manager so connections can be reused
     connectionManager = new PoolingHttpClientConnectionManager();
-    connectionManager.setDefaultMaxPerRoute(100);
+    connectionManager.setDefaultMaxPerRoute(maxQueryEndPoints);
 
     ht = HttpClients.custom()
       .setConnectionManager(connectionManager)
@@ -239,17 +239,19 @@ public class CouchbaseRestClient extends DB {
     try {
       List<NameValuePair> nvps = new ArrayList<>();
       String jsonData = "";
+      String host = getN1QLHost();
 
       if (!adhoc) {
-        if (!prepareCache.containsKey(query)) {
-          if (!executePrepare(query)) {
+        if (!prepareCache.containsKey(query+host)) {
+          if (!executePrepare(query, host)) {
             return Status.ERROR;
           }
         }
-        Map<String, String> prepared = prepareCache.get(query);
+        Map<String, String> prepared = prepareCache.get(query+host);
         JsonObject obj = new JsonObject();
         obj.addProperty("prepared", prepared.get("name").toString());
-        obj.addProperty("encoded_plan", prepared.get("encoded_plan").toString());
+        //Do not include encoded_plan as it adds additional overhead to request
+        //obj.addProperty("encoded_plan", prepared.get("encoded_plan").toString());
         obj.add("args", args);
         jsonData = obj.toString();
       } else {
@@ -259,7 +261,7 @@ public class CouchbaseRestClient extends DB {
 
       nvps.add(new BasicNameValuePair("timeout", Integer.toString(QUERY_TIMEOUT) + "s"));
       nvps.add(new BasicNameValuePair("max_parallelism", Integer.toString(maxParallelism)));
-      JsonObject obj = executeRequest(nvps, jsonData);
+      JsonObject obj = executeRequest(nvps, host, jsonData);
 
       if (obj != null) {
         if (obj.has("errors")) {
@@ -278,11 +280,11 @@ public class CouchbaseRestClient extends DB {
 
   }
 
-  private boolean executePrepare(String query) {
+  private boolean executePrepare(String query, String host) {
     try {
       List<NameValuePair> nvps = new ArrayList<>();
       nvps.add(new BasicNameValuePair("statement", "PREPARE " + query));
-      JsonObject obj = executeRequest(nvps, "");
+      JsonObject obj = executeRequest(nvps, host, "");
 
       if (obj != null && obj.has("results")) {
         JsonArray arr = obj.getAsJsonArray("results");
@@ -291,7 +293,7 @@ public class CouchbaseRestClient extends DB {
         Map<String, String> prepared = new HashMap<>();
         prepared.put("name", results.get("name").getAsString());
         prepared.put("encoded_plan", results.get("encoded_plan").getAsString());
-        prepareCache.put(query, prepared);
+        prepareCache.put(query+host, prepared);
       } else {
         throw new DBException("Prepare request got a bad response" + obj.toString());
       }
@@ -302,8 +304,8 @@ public class CouchbaseRestClient extends DB {
     return true;
   }
 
-  private JsonObject executeRequest(List<NameValuePair> nvps, String jsonData) throws DBException {
-    httpPost = new HttpPost("http://" + getN1QLHost() + ":" + Integer.toString(N1QL_PORT) + "/query/service");
+  private JsonObject executeRequest(List<NameValuePair> nvps, String host, String jsonData) throws DBException {
+    httpPost = new HttpPost("http://" + host + ":" + Integer.toString(N1QL_PORT) + "/query/service");
     httpPost.setHeader("Accept", "application/json");
     httpPost.setHeader("Accept-Encoding", "*/*");
     try {
