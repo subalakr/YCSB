@@ -23,6 +23,7 @@ import org.apache.http.*;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
+import org.apache.http.config.SocketConfig;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
@@ -116,11 +117,16 @@ public class CouchbaseRestClient extends DB {
     //use a pooling connection manager so connections can be reused
     connectionManager = new PoolingHttpClientConnectionManager();
     connectionManager.setDefaultMaxPerRoute(maxQueryEndPoints);
+    SocketConfig socketConfig = SocketConfig.custom()
+      .setSoKeepAlive(true)
+      .setTcpNoDelay(true)
+      .build();
 
     ht = HttpClients.custom()
       .setConnectionManager(connectionManager)
       .setKeepAliveStrategy(keepAliveStrategy)
       .setConnectionReuseStrategy(new DefaultConnectionReuseStrategy())
+      .setDefaultSocketConfig(socketConfig)
       .build();
 
   }
