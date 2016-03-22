@@ -186,6 +186,9 @@ public class CouchbaseRestClient extends DB {
   @Override
   public Status scan(String table, String startkey, int recordcount, Set<String> fields,
                      Vector<HashMap<String, ByteIterator>> result) {
+    if (fields == null || fields.isEmpty()) {
+        fields = new HashSet<String>(Arrays.asList("field0", "field1", "field2", "field3", "field4", "field5", "field6", "field7", "field8", "field9"));
+    }
     String scanQuery = "SELECT " + joinSet(bucketName, fields) + " FROM `"
             + bucketName + "` WHERE meta().id >= '$1' LIMIT $2";
     JsonArray args = new JsonArray();
