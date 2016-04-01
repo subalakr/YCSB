@@ -17,6 +17,7 @@
 
 package com.yahoo.ycsb.db;
 
+import com.google.gson.*;
 import com.google.gson.stream.JsonReader;
 import com.yahoo.ycsb.*;
 import org.apache.http.*;
@@ -27,10 +28,6 @@ import org.apache.http.config.SocketConfig;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonParser;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.message.BasicNameValuePair;
 import org.apache.http.conn.ConnectionKeepAliveStrategy;
@@ -40,6 +37,7 @@ import org.apache.http.protocol.HttpContext;
 import org.apache.http.impl.DefaultConnectionReuseStrategy;
 import java.io.*;
 import java.util.*;
+import java.util.Map.Entry;
 import org.apache.http.util.EntityUtils;
 
 /**
@@ -186,22 +184,19 @@ public class CouchbaseRestClient extends DB {
   @Override
   public Status scan(String table, String startkey, int recordcount, Set<String> fields,
                      Vector<HashMap<String, ByteIterator>> result) {
-    if (fields == null || fields.isEmpty()) {
-        fields = new HashSet<String>(Arrays.asList("field0", "field1", "field2", "field3", "field4", "field5", "field6", "field7", "field8", "field9"));
-    }
     String scanQuery = "SELECT " + joinSet(bucketName, fields) + " FROM `"
             + bucketName + "` WHERE meta().id >= '$1' LIMIT $2";
     JsonArray args = new JsonArray();
     args.add(formatId(table, startkey));
     args.add(recordcount);
-    Status s = query(scanQuery, args);
+    Status s = query(scanQuery, args, fields, result);
     return s;
 
   }
 
   private static String joinSet(final String bucket, final Set<String> fields) {
     if (fields == null || fields.isEmpty()) {
-      return "*";
+      return bucket + ".*";
     }
     StringBuilder builder = new StringBuilder();
     for (String f : fields) {
@@ -245,6 +240,10 @@ public class CouchbaseRestClient extends DB {
   }
 
   private Status query(String query, JsonArray args) {
+    return query(query, args, null, null);
+  }
+
+  private Status query(String query, JsonArray args, Set<String> fields, Vector<HashMap<String, ByteIterator>> result) {
     try {
       List<NameValuePair> nvps = new ArrayList<>();
       String jsonData = "";
@@ -276,6 +275,25 @@ public class CouchbaseRestClient extends DB {
         if (obj.has("errors")) {
           System.out.println("Errors:" + obj.get("errors").toString());
           return Status.ERROR;
+        } else {
+          Set<String> fieldNames = fields;
+          if (obj.has("results")) {
+            JsonArray rows = obj.getAsJsonArray("results");
+            for (JsonElement row : rows) {
+              if (fieldNames == null || fieldNames.isEmpty()) {
+                fieldNames = new HashSet<>();
+                Set<Entry<String, JsonElement>> fieldsInRow = row.getAsJsonObject().entrySet();
+                for (Entry<String, JsonElement> field : fieldsInRow) {
+                  fieldNames.add(field.getKey());
+                }
+              }
+              HashMap<String, ByteIterator> tuple = new HashMap<String, ByteIterator>(fieldNames.size());
+              for (String field : fieldNames) {
+                tuple.put(field, new StringByteIterator(row.getAsJsonObject().get(field).toString()));
+              }
+              result.add(tuple);
+            }
+          }
         }
       } else {
         System.out.println("No content found");
