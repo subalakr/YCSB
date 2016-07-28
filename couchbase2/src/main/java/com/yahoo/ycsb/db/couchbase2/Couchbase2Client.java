@@ -581,10 +581,14 @@ public class Couchbase2Client extends DB {
   public Status scan(final String table, final String startkey, final int recordcount, final Set<String> fields,
       final Vector<HashMap<String, ByteIterator>> result) {
     try {
-      if (fields == null || fields.isEmpty()) {
-        return scanAllFields(table, startkey, recordcount, result);
-      } else {
-        return scanSpecificFields(table, startkey, recordcount, fields, result);
+      if (kv) {
+        if (fields == null || fields.isEmpty()) {
+          return scanAllFieldsusingKV(table, startkey, recordcount, result);
+        } else {
+          throw new DBException("Scanning specific fields is not supported through KV");
+        }
+      }  else {
+        return scanFieldsUsingN1QL(table, startkey, recordcount, fields, result);
       }
     } catch (Exception ex) {
       ex.printStackTrace();
@@ -605,7 +609,7 @@ public class Couchbase2Client extends DB {
    * @param result A Vector of HashMaps, where each HashMap is a set field/value pairs for one record
    * @return The result of the operation.
    */
-  private Status scanAllFields(final String table, final String startkey, final int recordcount,
+  private Status scanAllFieldsusingKV(final String table, final String startkey, final int recordcount,
       final Vector<HashMap<String, ByteIterator>> result) {
     final List<HashMap<String, ByteIterator>> data = new ArrayList<HashMap<String, ByteIterator>>(recordcount);
 
@@ -666,7 +670,7 @@ public class Couchbase2Client extends DB {
    * @param result A Vector of HashMaps, where each HashMap is a set field/value pairs for one record
    * @return The result of the operation.
    */
-  private Status scanSpecificFields(final String table, final String startkey, final int recordcount,
+  private Status scanFieldsUsingN1QL(final String table, final String startkey, final int recordcount,
       final Set<String> fields, final Vector<HashMap<String, ByteIterator>> result) {
     String scanSpecQuery = "SELECT " + joinFields(fields) + " FROM `" + bucketName
         + "` WHERE meta().id >= '$1' LIMIT $2";
